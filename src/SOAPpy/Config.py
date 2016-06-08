@@ -34,12 +34,8 @@
 """
 
 ident = '$Id: Config.py 1298 2006-11-07 00:54:15Z sanxiyn $'
-from version import __version__
+from .NS import NS
 
-import socket
-from types import *
-
-from NS import NS
 
 ################################################################################
 # Configuration class
@@ -48,22 +44,22 @@ from NS import NS
 
 class SOAPConfig:
     __readonly = ('SSLserver', 'SSLclient', 'GSIserver', 'GSIclient')
+
     class SSLconfig:
         __slots__ = ('key_file', 'cert_file')
         key_file = None
         cert_file = None
 
-    def __init__(self, config = None, **kw):
+    def __init__(self, config=None, **kw):
         d = self.__dict__
 
         if config:
             if not isinstance(config, SOAPConfig):
-                raise AttributeError, \
-                    "initializer must be SOAPConfig instance"
+                raise AttributeError("initializer must be SOAPConfig instance")
 
             s = config.__dict__
 
-            for k, v in s.items():
+            for k, v in list(s.items()):
                 if k[0] != '_':
                     d[k] = v
         else:
@@ -123,23 +119,6 @@ class SOAPConfig:
             # (including self; possibility to call any SOAPBuilder dump method)
             self.dumpmap = tuple()
 
-            # Globus Support if pyGlobus.io available
-            try:
-                from pyGlobus import io;
-                d['GSIserver'] = 1
-                d['GSIclient'] = 1
-            except:
-                d['GSIserver'] = 0
-                d['GSIclient'] = 0
-
-
-            # Server SSL support if M2Crypto.SSL available
-            try:
-                from M2Crypto import SSL
-                d['SSLserver'] = 1
-            except:
-                d['SSLserver'] = 0
-
             # Client SSL support if socket.ssl available
             try:
                 from socket import ssl
@@ -157,13 +136,13 @@ class SOAPConfig:
                 raise TypeError("Config dumpmap parameter must be a tuple")
             self.dumpmap = dumpmap + self.dumpmap
 
-        for k, v in kw.items():
+        for k, v in list(kw.items()):
             if k[0] != '_':
                 setattr(self, k, v)
 
     def __setattr__(self, name, value):
         if name in self.__readonly:
-            raise AttributeError, "readonly configuration setting"
+            raise AttributeError("readonly configuration setting")
 
         d = self.__dict__
 
@@ -175,20 +154,20 @@ class SOAPConfig:
             else:
                 base, uri = name, 0
 
-            if type(value) == StringType:
-                if NS.NSMAP.has_key(value):
+            if 'str' in str(type(value)):
+                if value in NS.NSMAP:
                     n = (value, NS.NSMAP[value])
-                elif NS.NSMAP_R.has_key(value):
+                elif value in NS.NSMAP_R:
                     n = (NS.NSMAP_R[value], value)
                 else:
-                    raise AttributeError, "unknown namespace"
-            elif type(value) in (ListType, TupleType):
+                    raise AttributeError("unknown namespace")
+            elif 'tuple' in str(type(value)) or 'list' in str(type(value)):
                 if uri:
                     n = (value[1], value[0])
                 else:
                     n = (value[0], value[1])
             else:
-                raise AttributeError, "unknown namespace type"
+                raise AttributeError("unknown namespace type")
 
             d[base], d[base + 'URI'] = n
 
@@ -201,8 +180,8 @@ class SOAPConfig:
         elif name == 'namespaceStyle':
             value = str(value)
 
-            if not NS.STMAP.has_key(value):
-                raise AttributeError, "unknown namespace style"
+            if value not in NS.STMAP:
+                raise AttributeError("unknown namespace style")
 
             d[name] = value
             n = d['typesNamespace'] = NS.STMAP[value][0]
@@ -211,12 +190,12 @@ class SOAPConfig:
             d['schemaNamespaceURI'] = NS.NSMAP[n]
 
         elif name == 'debug':
-            d[name]                     = \
-                d['returnFaultInfo']    = \
-                d['dumpHeadersIn']      = \
-                d['dumpHeadersOut']     = \
-                d['dumpSOAPIn']         = \
-                d['dumpSOAPOut']        = value
+            d[name] = \
+                d['returnFaultInfo'] = \
+                d['dumpHeadersIn'] = \
+                d['dumpHeadersOut'] = \
+                d['dumpSOAPIn'] = \
+                d['dumpSOAPOut'] = value
 
         else:
             d[name] = value

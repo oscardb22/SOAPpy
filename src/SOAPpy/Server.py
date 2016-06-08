@@ -40,33 +40,22 @@
 ################################################################################
 
 """
-from __future__ import nested_scopes
-
 ident = '$Id: Server.py 1468 2008-05-24 01:55:33Z warnes $'
-from version import __version__
+from .version import __version__
 
-#import xml.sax
-import socket
-import sys
-import SocketServer
+import socketserver
 from types import *
-import BaseHTTPServer
-import thread
+import http.server
+import _thread
+import collections
 
 # SOAPpy modules
-from Parser      import parseSOAPRPC
-from Config      import Config
-from Types       import faultType, voidType, simplify
-from NS          import NS
-from SOAPBuilder import buildSOAP
-from Utilities   import debugHeader, debugFooter
+from .Parser import parseSOAPRPC
+from .Types import faultType, voidType, simplify
+from .NS import NS
+from .SOAPBuilder import buildSOAP
+from .Utilities import debugHeader, debugFooter
 
-try: from M2Crypto import SSL
-except: pass
-
-ident = '$Id: Server.py 1468 2008-05-24 01:55:33Z warnes $'
-
-from version import __version__
 
 ################################################################################
 # Call context dictionary
@@ -74,9 +63,11 @@ from version import __version__
 
 _contexts = dict()
 
+
 def GetSOAPContext():
     global _contexts
-    return _contexts[thread.get_ident()]
+    return _contexts[_thread.get_ident()]
+
 
 ################################################################################
 # Server
@@ -87,31 +78,31 @@ def GetSOAPContext():
 # params.
 class MethodSig:
     def __init__(self, func, keywords=0, context=0):
-        self.func     = func
+        self.func = func
         self.keywords = keywords
-        self.context  = context
+        self.context = context
         self.__name__ = func.__name__
 
     def __call__(self, *args, **kw):
-        return apply(self.func,args,kw)
+        return self.func(args, kw)
+
 
 class SOAPContext:
-    def __init__(self, header, body, attrs, xmldata, connection, httpheaders,
-        soapaction):
-
-        self.header     = header
-        self.body       = body
-        self.attrs      = attrs
-        self.xmldata    = xmldata
+    def __init__(self, header, body, attrs, xmldata, connection, httpheaders, soapaction):
+        self.header = header
+        self.body = body
+        self.attrs = attrs
+        self.xmldata = xmldata
         self.connection = connection
-        self.httpheaders= httpheaders
+        self.httpheaders = httpheaders
         self.soapaction = soapaction
+
 
 # A class to describe how header messages are handled
 class HeaderHandler:
     # Initially fail out if there are any problems.
     def __init__(self, header, attrs):
-        for i in header.__dict__.keys():
+        for i in list(header.__dict__.keys()):
             if i[0] == "_":
                 continue
 
@@ -123,65 +114,57 @@ class HeaderHandler:
                 fault = 0
 
             if fault:
-                raise faultType, ("%s:MustUnderstand" % NS.ENV_T,
-                                  "Required Header Misunderstood",
-                                  "%s" % i)
+                raise faultType("%s:MustUnderstand" % NS.ENV_T, "Required Header Misunderstood", "%s" % i)
+
 
 ################################################################################
 # SOAP Server
 ################################################################################
 class SOAPServerBase:
+    ssl_context = {}
+    funcmap = {}
+    objmap = {}
+    namespace = None
 
-    def get_request(self):
-        sock, addr = SocketServer.TCPServer.get_request(self)
-
-        if self.ssl_context:
-            sock = SSL.Connection(self.ssl_context, sock)
-            sock._setup_ssl(addr)
-            if sock.accept_ssl() != 1:
-                raise socket.error, "Couldn't accept SSL connection"
-
-        return sock, addr
-
-    def registerObject(self, object, namespace = '', path = ''):
+    def registerObject(self, object, namespace='', path=''):
         if namespace == '' and path == '': namespace = self.namespace
         if namespace == '' and path != '':
             namespace = path.replace("/", ":")
             if namespace[0] == ":": namespace = namespace[1:]
         self.objmap[namespace] = object
 
-    def registerFunction(self, function, namespace = '', funcName = None,
-                         path = ''):
-        if not funcName : funcName = function.__name__
+    def registerFunction(self, function, namespace='', funcName=None,
+                         path=''):
+        if not funcName: funcName = function.__name__
         if namespace == '' and path == '': namespace = self.namespace
         if namespace == '' and path != '':
             namespace = path.replace("/", ":")
             if namespace[0] == ":": namespace = namespace[1:]
-        if self.funcmap.has_key(namespace):
+        if namespace in self.funcmap:
             self.funcmap[namespace][funcName] = function
         else:
-            self.funcmap[namespace] = {funcName : function}
+            self.funcmap[namespace] = {funcName: function}
 
-    def registerKWObject(self, object, namespace = '', path = ''):
+    def registerKWObject(self, object, namespace='', path=''):
         if namespace == '' and path == '': namespace = self.namespace
         if namespace == '' and path != '':
             namespace = path.replace("/", ":")
             if namespace[0] == ":": namespace = namespace[1:]
         for i in dir(object.__class__):
-            if i[0] != "_" and callable(getattr(object, i)):
-                self.registerKWFunction(getattr(object,i), namespace)
+            if i[0] != "_" and isinstance(getattr(object, i), collections.Callable):
+                self.registerKWFunction(getattr(object, i), namespace)
 
     # convenience  - wraps your func for you.
-    def registerKWFunction(self, function, namespace = '', funcName = None,
-                           path = ''):
+    def registerKWFunction(self, function, namespace='', funcName=None,
+                           path=''):
         if namespace == '' and path == '': namespace = self.namespace
         if namespace == '' and path != '':
             namespace = path.replace("/", ":")
             if namespace[0] == ":": namespace = namespace[1:]
-        self.registerFunction(MethodSig(function,keywords=1), namespace,
-        funcName)
+        self.registerFunction(MethodSig(function, keywords=1), namespace,
+                              funcName)
 
-    def unregisterObject(self, object, namespace = '', path = ''):
+    def unregisterObject(self, object, namespace='', path=''):
         if namespace == '' and path == '': namespace = self.namespace
         if namespace == '' and path != '':
             namespace = path.replace("/", ":")
@@ -189,19 +172,14 @@ class SOAPServerBase:
 
         del self.objmap[namespace]
 
-class SOAPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
+
+class SOAPRequestHandler(http.server.BaseHTTPRequestHandler):
     ignore_ext = True
+
     def version_string(self):
         return '<a href="http://pywebsvcs.sf.net">' + \
-            'SOAPpy ' + __version__ + '</a> (Python ' + \
-            sys.version.split()[0] + ')'
-
-    def date_time_string(self):
-        self.__last_date_time_string = \
-            BaseHTTPServer.BaseHTTPRequestHandler.\
-            date_time_string(self)
-
-        return self.__last_date_time_string
+               'SOAPpy ' + __version__ + '</a> (Python ' + \
+               sys.version.split()[0] + ')'
 
     def do_POST(self):
         global _contexts
@@ -211,9 +189,8 @@ class SOAPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             if self.server.config.dumpHeadersIn:
                 s = 'Incoming HTTP headers'
                 debugHeader(s)
-                print self.raw_requestline.strip()
-                print "\n".join(map (lambda x: x.strip(),
-                    self.headers.headers))
+                print((self.raw_requestline.strip()))
+                print(("\n".join([x.strip() for x in self.headers.headers])))
                 debugFooter(s)
 
             data = self.rfile.read(int(self.headers["Content-length"]))
@@ -221,17 +198,17 @@ class SOAPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             if self.server.config.dumpSOAPIn:
                 s = 'Incoming SOAP'
                 debugHeader(s)
-                print data,
+                print(data)
                 if data[-1] != '\n':
-                    print
+                    print('')
                 debugFooter(s)
 
             (r, header, body, attrs) = \
-                parseSOAPRPC(data, header = 1, body = 1, attrs = 1, ignore_ext=self.ignore_ext)
+                parseSOAPRPC(data, header=1, body=1, attrs=1, ignore_ext=self.ignore_ext)
 
             method = r._name
-            args   = r._aslist()
-            kw     = r._asdict()
+            args = r._aslist()
+            kw = r._asdict()
 
             if self.server.config.simplify_objects:
                 args = simplify(args)
@@ -251,13 +228,13 @@ class SOAPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
 
             ordered_args = {}
-            named_args   = {}
+            named_args = {}
 
             if self.server.config.specialArgs:
 
-                for (k,v) in  kw.items():
+                for (k, v) in list(kw.items()):
 
-                    if k[0]=="v":
+                    if k[0] == "v":
                         try:
                             i = int(k[1:])
                             ordered_args[i] = v
@@ -282,16 +259,16 @@ class SOAPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             # authorization method
             a = None
 
-            keylist = ordered_args.keys()
+            keylist = list(ordered_args.keys())
             keylist.sort()
 
             # create list in proper order w/o names
-            tmp = map( lambda x: ordered_args[x], keylist)
+            tmp = [ordered_args[x] for x in keylist]
             ordered_args = tmp
 
-            #print '<-> Argument Matching Yielded:'
-            #print '<-> Ordered Arguments:' + str(ordered_args)
-            #print '<-> Named Arguments  :' + str(named_args)
+            # print '<-> Argument Matching Yielded:'
+            # print '<-> Ordered Arguments:' + str(ordered_args)
+            # print '<-> Named Arguments  :' + str(named_args)
 
             resp = ""
 
@@ -303,15 +280,13 @@ class SOAPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
             try:
                 # First look for registered functions
-                if self.server.funcmap.has_key(ns) and \
-                    self.server.funcmap[ns].has_key(method):
+                if ns in self.server.funcmap and method in self.server.funcmap[ns]:
                     f = self.server.funcmap[ns][method]
 
                     # look for the authorization method
-                    if self.server.config.authMethod != None:
+                    if self.server.config.authMethod:
                         authmethod = self.server.config.authMethod
-                        if self.server.funcmap.has_key(ns) and \
-                               self.server.funcmap[ns].has_key(authmethod):
+                        if ns in self.server.funcmap and authmethod in self.server.funcmap[ns]:
                             a = self.server.funcmap[ns][authmethod]
                 else:
                     # Now look at registered objects
@@ -339,8 +314,8 @@ class SOAPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                                                                   info[0],
                                                                   info[1],
                                                                   info[2])),
-                                     encoding = self.server.encoding,
-                                     config = self.server.config)
+                                     encoding=self.server.encoding,
+                                     config=self.server.config)
                 finally:
                     del info
                 status = 500
@@ -348,7 +323,6 @@ class SOAPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 try:
                     if header:
                         x = HeaderHandler(header, attrs)
-
                     fr = 1
 
                     # call context book keeping
@@ -357,11 +331,10 @@ class SOAPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                     # and it won't be necessary here
                     # for now we're doing both
 
-                    if "SOAPAction".lower() not in self.headers.keys() or \
-                       self.headers["SOAPAction"] == "\"\"":
+                    if "SOAPAction".lower() not in list(self.headers.keys()) or self.headers["SOAPAction"] == "\"\"":
                         self.headers["SOAPAction"] = method
 
-                    thread_id = thread.get_ident()
+                    thread_id = _thread.get_ident()
                     _contexts[thread_id] = SOAPContext(header, body,
                                                        attrs, data,
                                                        self.connection,
@@ -369,9 +342,8 @@ class SOAPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                                                        self.headers["SOAPAction"])
 
                     # Do an authorization check
-                    if a != None:
-                        if not apply(a, (), {"_SOAPContext" :
-                                             _contexts[thread_id] }):
+                    if a:
+                        if not a(*(), **{"_SOAPContext": _contexts[thread_id]}):
                             raise faultType("%s:Server" % NS.ENV_T,
                                             "Authorization failed.",
                                             "%s" % nsmethod)
@@ -386,46 +358,45 @@ class SOAPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                         if self.server.config.specialArgs:
                             if c:
                                 named_args["_SOAPContext"] = c
-                            fr = apply(f, ordered_args, named_args)
+                            fr = f(*ordered_args, **named_args)
                         elif f.keywords:
                             # This is lame, but have to de-unicode
                             # keywords
 
                             strkw = {}
 
-                            for (k, v) in kw.items():
+                            for (k, v) in list(kw.items()):
                                 strkw[str(k)] = v
                             if c:
                                 strkw["_SOAPContext"] = c
-                            fr = apply(f, (), strkw)
+                            fr = f(*(), **strkw)
                         elif c:
-                            fr = apply(f, args, {'_SOAPContext':c})
+                            fr = f(*args, **{'_SOAPContext': c})
                         else:
-                            fr = apply(f, args, {})
+                            fr = f(*args, **{})
 
                     else:
                         if self.server.config.specialArgs:
-                            fr = apply(f, ordered_args, named_args)
+                            fr = f(*ordered_args, **named_args)
                         else:
-                            fr = apply(f, args, {})
-
+                            fr = f(*args, **{})
 
                     if type(fr) == type(self) and \
-                        isinstance(fr, voidType):
-                        resp = buildSOAP(kw = {'%sResponse' % method: fr},
-                            encoding = self.server.encoding,
-                            config = self.server.config)
+                            isinstance(fr, voidType):
+                        resp = buildSOAP(kw={'%sResponse' % method: fr},
+                                         encoding=self.server.encoding,
+                                         config=self.server.config)
                     else:
-                        resp = buildSOAP(kw =
-                            {'%sResponse' % method: {'Result': fr}},
-                            encoding = self.server.encoding,
-                            config = self.server.config)
+                        resp = buildSOAP(kw=
+                                         {'%sResponse' % method: {'Result': fr}},
+                                         encoding=self.server.encoding,
+                                         config=self.server.config)
 
                     # Clean up _contexts
-                    if _contexts.has_key(thread_id):
+                    if thread_id in _contexts:
                         del _contexts[thread_id]
 
-                except Exception, e:
+                except Exception as e:
                     import traceback
                     info = sys.exc_info()
 
@@ -452,12 +423,12 @@ class SOAPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                     finally:
                         del info
 
-                    resp = buildSOAP(f, encoding = self.server.encoding,
-                       config = self.server.config)
+                    resp = buildSOAP(f, encoding=self.server.encoding,
+                                     config=self.server.config)
                     status = 500
                 else:
                     status = 200
-        except faultType, e:
+        except faultType as e:
             import traceback
             info = sys.exc_info()
             try:
@@ -465,21 +436,21 @@ class SOAPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                     s = 'Received fault exception'
                     debugHeader(s)
                     traceback.print_exception(info[0], info[1],
-                        info[2])
+                                              info[2])
                     debugFooter(s)
 
                 if self.server.config.returnFaultInfo:
                     e._setDetail("".join(traceback.format_exception(
-                            info[0], info[1], info[2])))
+                        info[0], info[1], info[2])))
                 elif not hasattr(e, 'detail'):
                     e._setDetail("%s %s" % (info[0], info[1]))
             finally:
                 del info
 
-            resp = buildSOAP(e, encoding = self.server.encoding,
-                config = self.server.config)
+            resp = buildSOAP(e, encoding=self.server.encoding,
+                             config=self.server.config)
             status = 500
-        except Exception, e:
+        except Exception as e:
             # internal error, report as HTTP server error
 
             if self.server.config.dumpFaultInfo:
@@ -498,49 +469,49 @@ class SOAPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             self.end_headers()
 
             if self.server.config.dumpHeadersOut and \
-                self.request_version != 'HTTP/0.9':
+                            self.request_version != 'HTTP/0.9':
                 s = 'Outgoing HTTP headers'
                 debugHeader(s)
-                if self.responses.has_key(status):
+                if status in self.responses:
                     s = ' ' + self.responses[status][0]
                 else:
                     s = ''
-                print "%s %d%s" % (self.protocol_version, 500, s)
-                print "Server:", self.version_string()
-                print "Date:", self.__last_date_time_string
+                print(("%s %d%s" % (self.protocol_version, 500, s)))
+                print(("Server:", self.version_string()))
+                print(("Date:", self.log_date_time_string()))
                 debugFooter(s)
         else:
             # got a valid SOAP response
             self.send_response(status)
 
-            t = 'text/xml';
-            if self.server.encoding != None:
+            t = 'text/xml'
+            if self.server.encoding:
                 t += '; charset=%s' % self.server.encoding
             self.send_header("Content-type", t)
             self.send_header("Content-length", str(len(resp)))
             self.end_headers()
 
             if self.server.config.dumpHeadersOut and \
-                self.request_version != 'HTTP/0.9':
+                            self.request_version != 'HTTP/0.9':
                 s = 'Outgoing HTTP headers'
                 debugHeader(s)
-                if self.responses.has_key(status):
+                if status in self.responses:
                     s = ' ' + self.responses[status][0]
                 else:
                     s = ''
-                print "%s %d%s" % (self.protocol_version, status, s)
-                print "Server:", self.version_string()
-                print "Date:", self.__last_date_time_string
-                print "Content-type:", t
-                print "Content-length:", len(resp)
+                print(("%s %d%s" % (self.protocol_version, status, s)))
+                print(("Server:", self.version_string()))
+                print(("Date:", self.log_date_time_string()))
+                print(("Content-type:", t))
+                print(("Content-length:", len(resp)))
                 debugFooter(s)
 
             if self.server.config.dumpSOAPOut:
                 s = 'Outgoing SOAP'
                 debugHeader(s)
-                print resp,
+                print(resp)
                 if resp[-1] != '\n':
-                    print
+                    print('')
                 debugFooter(s)
 
             self.wfile.write(resp)
@@ -551,33 +522,27 @@ class SOAPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             # SSL connections drops the output, so this work-around.
             # This should be investigated more someday.
 
-            if self.server.config.SSLserver and \
-                isinstance(self.connection, SSL.Connection):
-                self.connection.set_shutdown(SSL.SSL_SENT_SHUTDOWN |
-                    SSL.SSL_RECEIVED_SHUTDOWN)
-            else:
-                self.connection.shutdown(1)
+            self.connection.shutdown(1)
 
         def do_GET(self):
 
-            #print 'command        ', self.command
-            #print 'path           ', self.path
-            #print 'request_version', self.request_version
-            #print 'headers'
-            #print '   type    ', self.headers.type
-            #print '   maintype', self.headers.maintype
-            #print '   subtype ', self.headers.subtype
-            #print '   params  ', self.headers.plist
+            # print 'command        ', self.command
+            # print 'path           ', self.path
+            # print 'request_version', self.request_version
+            # print 'headers'
+            # print '   type    ', self.headers.type
+            # print '   maintype', self.headers.maintype
+            # print '   subtype ', self.headers.subtype
+            # print '   params  ', self.headers.plist
 
             path = self.path.lower()
             if path.endswith('wsdl'):
                 method = 'wsdl'
                 function = namespace = None
-                if self.server.funcmap.has_key(namespace) \
-                        and self.server.funcmap[namespace].has_key(method):
+                if namespace in self.server.funcmap and method in self.server.funcmap[namespace]:
                     function = self.server.funcmap[namespace][method]
                 else:
-                    if namespace in self.server.objmap.keys():
+                    if namespace in list(self.server.objmap.keys()):
                         function = self.server.objmap[namespace]
                         l = method.split(".")
                         for i in l:
@@ -587,7 +552,7 @@ class SOAPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                     self.send_response(200)
                     self.send_header("Content-type", 'text/plain')
                     self.end_headers()
-                    response = apply(function, ())
+                    response = function(*())
                     self.wfile.write(str(response))
                     return
 
@@ -615,101 +580,16 @@ class SOAPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
 </body>''')
 
-
     def log_message(self, format, *args):
         if self.server.log:
-            BaseHTTPServer.BaseHTTPRequestHandler.\
-                log_message (self, format, *args)
+            http.server.BaseHTTPRequestHandler.log_message(self, format, *args)
 
 
-class SOAPInsecureRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
-    '''Request handler that does load POSTed doctypes'''
+class SOAPInsecureRequestHandler(http.server.BaseHTTPRequestHandler):
+    # Request handler that does load POSTed doctypes
     ignore_ext = False
 
 
-class SOAPServer(SOAPServerBase, SocketServer.TCPServer):
-
-    def __init__(self, addr = ('localhost', 8000),
-        RequestHandler = SOAPRequestHandler, log = 0, encoding = 'UTF-8',
-        config = Config, namespace = None, ssl_context = None):
-
-        # Test the encoding, raising an exception if it's not known
-        if encoding != None:
-            ''.encode(encoding)
-
-        if ssl_context != None and not config.SSLserver:
-            raise AttributeError, \
-                "SSL server not supported by this Python installation"
-
-        self.namespace          = namespace
-        self.objmap             = {}
-        self.funcmap            = {}
-        self.ssl_context        = ssl_context
-        self.encoding           = encoding
-        self.config             = config
-        self.log                = log
-
-        self.allow_reuse_address= 1
-
-        SocketServer.TCPServer.__init__(self, addr, RequestHandler)
-
-
-class ThreadingSOAPServer(SOAPServerBase, SocketServer.ThreadingTCPServer):
-
-    def __init__(self, addr = ('localhost', 8000),
-        RequestHandler = SOAPRequestHandler, log = 0, encoding = 'UTF-8',
-        config = Config, namespace = None, ssl_context = None):
-
-        # Test the encoding, raising an exception if it's not known
-        if encoding != None:
-            ''.encode(encoding)
-
-        if ssl_context != None and not config.SSLserver:
-            raise AttributeError, \
-                "SSL server not supported by this Python installation"
-
-        self.namespace          = namespace
-        self.objmap             = {}
-        self.funcmap            = {}
-        self.ssl_context        = ssl_context
-        self.encoding           = encoding
-        self.config             = config
-        self.log                = log
-
-        self.allow_reuse_address= 1
-
-        SocketServer.ThreadingTCPServer.__init__(self, addr, RequestHandler)
-
-# only define class if Unix domain sockets are available
-if hasattr(socket, "AF_UNIX"):
-
-    class SOAPUnixSocketServer(SOAPServerBase, SocketServer.UnixStreamServer):
-
-        def __init__(self, addr = 8000,
-            RequestHandler = SOAPRequestHandler, log = 0, encoding = 'UTF-8',
-            config = Config, namespace = None, ssl_context = None):
-
-            # Test the encoding, raising an exception if it's not known
-            if encoding != None:
-                ''.encode(encoding)
-
-            if ssl_context != None and not config.SSLserver:
-                raise AttributeError, \
-                    "SSL server not supported by this Python installation"
-
-            self.namespace          = namespace
-            self.objmap             = {}
-            self.funcmap            = {}
-            self.ssl_context        = ssl_context
-            self.encoding           = encoding
-            self.config             = config
-            self.log                = log
-
-            self.allow_reuse_address= 1
-
-            SocketServer.UnixStreamServer.__init__(self, str(addr), RequestHandler)
-
-
-
-
+class SOAPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    pass
 
